@@ -1,5 +1,7 @@
 # Torrust Server Lib
 
+[![CI](https://github.com/torrust/torrust-server-lib/actions/workflows/ci.yaml/badge.svg)](https://github.com/torrust/torrust-server-lib/actions/workflows/ci.yaml)
+
 Common functionality used in all Torrust HTTP servers.
 
 ## Documentation
