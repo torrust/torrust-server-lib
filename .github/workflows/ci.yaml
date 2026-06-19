@@ -1,0 +1,63 @@
+# CI Workflow for torrust-server-lib
+#
+# Runs linting and testing on every push and pull request to main/develop.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - id: checkout
+        name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - id: setup
+        name: Setup Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+
+      - id: sccache
+        name: Install sccache (GHA backend)
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - id: enable-sccache
+        name: Enable sccache
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
+      - id: fetch
+        name: Download Dependencies
+        run: cargo fetch --verbose
+
+      - id: linter
+        name: Install Internal Linter
+        run: cargo install --locked --git https://github.com/torrust/torrust-linting --bin linter
+
+      - id: format
+        name: Run Formatting Checks
+        run: cargo fmt --check
+
+      - id: lint
+        name: Run All Linters
+        run: linter all
+
+      - id: test
+        name: Run Tests
+        run: cargo test --workspace
