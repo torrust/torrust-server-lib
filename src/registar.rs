@@ -1,9 +1,9 @@
-//! Registar. Registers Services for Health Check.
+//! Runtime service registry.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
-use derive_more::Constructor;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use torrust_net_primitives::service_binding::ServiceBinding;
@@ -14,12 +14,17 @@ pub type ServiceHeathCheckResult = Result<String, String>;
 /// The [`ServiceHealthCheckJob`] has a health check job with it's metadata
 ///
 /// The `job` awaits a [`ServiceHeathCheckResult`].
-#[derive(Debug, Constructor)]
+#[derive(Debug)]
 pub struct ServiceHealthCheckJob {
-    pub service_binding: ServiceBinding,
     pub info: String,
-    pub service_type: String,
     pub job: JoinHandle<ServiceHeathCheckResult>,
+}
+
+impl ServiceHealthCheckJob {
+    #[must_use]
+    pub fn new(info: String, job: JoinHandle<ServiceHeathCheckResult>) -> Self {
+        Self { info, job }
+    }
 }
 
 /// The function specification [`FnSpawnServiceHeathCheck`].
@@ -27,75 +32,297 @@ pub struct ServiceHealthCheckJob {
 /// A function fulfilling this specification will spawn a new [`ServiceHealthCheckJob`].
 pub type FnSpawnServiceHeathCheck = fn(&ServiceBinding) -> ServiceHealthCheckJob;
 
-/// A [`ServiceRegistration`] is provided to the [`Registar`] for registration.
+/// Immutable data reported by a started local service.
 ///
-/// Each registration includes a function that fulfils the [`FnSpawnServiceHeathCheck`] specification.
-#[derive(Clone, Debug, Constructor)]
-pub struct ServiceRegistration {
+/// Metadata belongs to the application that uses the registry. The registry
+/// does not assign semantics to it.
+#[derive(Clone, Debug)]
+pub struct ServiceRegistration<M> {
     service_binding: ServiceBinding,
-    check_fn: FnSpawnServiceHeathCheck,
+    metadata: M,
+    health_check: Option<FnSpawnServiceHeathCheck>,
 }
 
-impl ServiceRegistration {
+impl<M> ServiceRegistration<M> {
     #[must_use]
-    pub fn spawn_check(&self) -> ServiceHealthCheckJob {
-        (self.check_fn)(&self.service_binding)
+    pub fn new(service_binding: ServiceBinding, metadata: M, health_check: Option<FnSpawnServiceHeathCheck>) -> Self {
+        Self {
+            service_binding,
+            metadata,
+            health_check,
+        }
+    }
+
+    #[must_use]
+    pub fn service_binding(&self) -> &ServiceBinding {
+        &self.service_binding
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &M {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub fn spawn_check(&self) -> Option<ServiceHealthCheckJob> {
+        self.health_check.map(|health_check| health_check(&self.service_binding))
     }
 }
 
-/// A [`ServiceRegistrationForm`] will return a completed [`ServiceRegistration`] to the [`Registar`].
-pub type ServiceRegistrationForm = tokio::sync::oneshot::Sender<ServiceRegistration>;
-
-/// The [`ServiceRegistry`] contains each unique [`ServiceRegistration`] by it's [`SocketAddr`].
-pub type ServiceRegistry = Arc<Mutex<HashMap<ServiceBinding, ServiceRegistration>>>;
-
-/// The [`Registar`] manages the [`ServiceRegistry`].
+/// A cloneable, immutable view of a registered service.
 #[derive(Clone, Debug)]
-pub struct Registar {
-    registry: ServiceRegistry,
+pub struct RegisteredService<M> {
+    registration: ServiceRegistration<M>,
 }
 
-#[allow(clippy::derivable_impls)]
-impl Default for Registar {
-    fn default() -> Self {
-        Self {
-            registry: ServiceRegistry::default(),
+impl<M> RegisteredService<M> {
+    #[must_use]
+    pub fn service_binding(&self) -> &ServiceBinding {
+        self.registration.service_binding()
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &M {
+        self.registration.metadata()
+    }
+
+    #[must_use]
+    pub fn spawn_check(&self) -> Option<ServiceHealthCheckJob> {
+        self.registration.spawn_check()
+    }
+}
+
+/// Registration failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationError {
+    /// A service already owns this final local binding.
+    DuplicateBinding(ServiceBinding),
+}
+
+impl fmt::Display for RegistrationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateBinding(service_binding) => {
+                write!(formatter, "a service is already registered for binding {service_binding}")
+            }
         }
     }
 }
 
-impl Registar {
-    pub fn new(register: ServiceRegistry) -> Self {
-        Self { registry: register }
-    }
+impl std::error::Error for RegistrationError {}
 
-    /// Registers a Service
+/// A single-use registration capability for one started service.
+///
+/// Obtain one form per successfully bound service with
+/// [`Registar::give_form`]. Consuming [`Self::register`] acknowledges that the
+/// registration is visible in registry snapshots.
+#[derive(Debug)]
+pub struct ServiceRegistrationForm<M> {
+    registar: Registar<M>,
+}
+
+impl<M> ServiceRegistrationForm<M> {
+    /// Inserts a registration and returns only after it is visible to queries.
+    ///
+    /// A caller may treat successful completion as its registry-readiness
+    /// acknowledgement after binding its listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistrationError::DuplicateBinding`] when another service is
+    /// already registered with the same final binding.
+    pub async fn register(self, registration: ServiceRegistration<M>) -> Result<(), RegistrationError> {
+        self.registar.insert(registration).await
+    }
+}
+
+/// The [`Registar`] manages immutable runtime service registrations.
+#[derive(Debug)]
+pub struct Registar<M = ()> {
+    registry: Arc<Mutex<HashMap<ServiceBinding, ServiceRegistration<M>>>>,
+}
+
+impl<M> Clone for Registar<M> {
+    fn clone(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+        }
+    }
+}
+
+impl<M> Default for Registar<M> {
+    fn default() -> Self {
+        Self {
+            registry: Arc::default(),
+        }
+    }
+}
+
+impl<M> Registar<M> {
+    /// Returns a capability to register one service.
     #[must_use]
-    pub fn give_form(&self) -> ServiceRegistrationForm {
-        let (tx, rx) = tokio::sync::oneshot::channel::<ServiceRegistration>();
-        let register = self.clone();
-        tokio::spawn(async move {
-            register.insert(rx).await;
-        });
-        tx
+    pub fn give_form(&self) -> ServiceRegistrationForm<M> {
+        ServiceRegistrationForm { registar: self.clone() }
     }
 
-    /// Inserts a listing into the registry.
-    async fn insert(&self, rx: tokio::sync::oneshot::Receiver<ServiceRegistration>) {
-        tracing::debug!("Waiting for the started service to send registration data ...");
-
-        let service_registration = rx
-            .await
-            .expect("it should receive the service registration from the started service");
-
+    async fn insert(&self, service_registration: ServiceRegistration<M>) -> Result<(), RegistrationError> {
         let mut mutex = self.registry.lock().await;
 
+        if mutex.contains_key(service_registration.service_binding()) {
+            return Err(RegistrationError::DuplicateBinding(
+                service_registration.service_binding().clone(),
+            ));
+        }
+
         mutex.insert(service_registration.service_binding.clone(), service_registration);
+
+        Ok(())
     }
 
-    /// Returns the [`ServiceRegistry`] of services
-    #[must_use]
-    pub fn entries(&self) -> ServiceRegistry {
-        self.registry.clone()
+    /// Returns a deterministic, side-effect-free snapshot of all services.
+    ///
+    /// Results are ordered by protocol, then final socket address, never by
+    /// insertion or hash-map iteration order.
+    pub async fn services(&self) -> Vec<RegisteredService<M>>
+    where
+        M: Clone,
+    {
+        let mutex = self.registry.lock().await;
+        let mut services: Vec<_> = mutex
+            .values()
+            .cloned()
+            .map(|registration| RegisteredService { registration })
+            .collect();
+        services.sort_by(|left, right| {
+            protocol_sort_key(&left.service_binding().protocol())
+                .cmp(&protocol_sort_key(&right.service_binding().protocol()))
+                .then_with(|| {
+                    left.service_binding()
+                        .bind_address()
+                        .cmp(&right.service_binding().bind_address())
+                })
+        });
+        services
+    }
+
+    /// Returns a deterministic, side-effect-free metadata query result.
+    pub async fn services_matching<F>(&self, predicate: F) -> Vec<RegisteredService<M>>
+    where
+        M: Clone,
+        F: Fn(&M) -> bool,
+    {
+        self.services()
+            .await
+            .into_iter()
+            .filter(|service| predicate(service.metadata()))
+            .collect()
+    }
+}
+
+fn protocol_sort_key(protocol: &torrust_net_primitives::service_binding::Protocol) -> u8 {
+    match protocol {
+        torrust_net_primitives::service_binding::Protocol::UDP => 0,
+        torrust_net_primitives::service_binding::Protocol::HTTP => 1,
+        torrust_net_primitives::service_binding::Protocol::HTTPS => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use torrust_net_primitives::service_binding::Protocol;
+
+    use super::{Registar, RegistrationError, ServiceRegistration};
+
+    fn binding(protocol: Protocol, port: u16) -> torrust_net_primitives::service_binding::ServiceBinding {
+        torrust_net_primitives::service_binding::ServiceBinding::new(protocol, SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+            .expect("test binding should be valid")
+    }
+
+    #[tokio::test]
+    async fn it_should_make_a_registration_visible_after_acknowledgement() {
+        let registar = Registar::default();
+
+        registar
+            .give_form()
+            .register(ServiceRegistration::new(binding(Protocol::HTTP, 8000), "first", None))
+            .await
+            .expect("registration should succeed");
+
+        assert_eq!(registar.services().await[0].metadata(), &"first");
+    }
+
+    #[tokio::test]
+    async fn it_should_return_services_in_deterministic_binding_order() {
+        let registar = Registar::default();
+
+        registar
+            .give_form()
+            .register(ServiceRegistration::new(binding(Protocol::HTTP, 9000), "second", None))
+            .await
+            .expect("registration should succeed");
+        registar
+            .give_form()
+            .register(ServiceRegistration::new(binding(Protocol::HTTP, 8000), "first", None))
+            .await
+            .expect("registration should succeed");
+
+        let metadata: Vec<_> = registar
+            .services()
+            .await
+            .into_iter()
+            .map(|service| *service.metadata())
+            .collect();
+
+        assert_eq!(metadata, ["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn it_should_order_services_by_protocol_then_final_binding() {
+        let registar = Registar::default();
+
+        for (protocol, port, metadata) in [
+            (Protocol::HTTPS, 8000, "https"),
+            (Protocol::HTTP, 9000, "http-second"),
+            (Protocol::UDP, 9000, "udp-second"),
+            (Protocol::HTTP, 8000, "http-first"),
+            (Protocol::UDP, 8000, "udp-first"),
+        ] {
+            registar
+                .give_form()
+                .register(ServiceRegistration::new(binding(protocol, port), metadata, None))
+                .await
+                .expect("registration should succeed");
+        }
+
+        let metadata: Vec<_> = registar
+            .services()
+            .await
+            .into_iter()
+            .map(|service| *service.metadata())
+            .collect();
+
+        assert_eq!(metadata, ["udp-first", "udp-second", "http-first", "http-second", "https"]);
+    }
+
+    #[tokio::test]
+    async fn it_should_reject_duplicate_final_bindings() {
+        let registar = Registar::default();
+        let service_binding = binding(Protocol::HTTP, 8000);
+
+        registar
+            .give_form()
+            .register(ServiceRegistration::new(service_binding.clone(), (), None))
+            .await
+            .expect("initial registration should succeed");
+
+        let error = registar
+            .give_form()
+            .register(ServiceRegistration::new(service_binding.clone(), (), None))
+            .await
+            .expect_err("duplicate registration should fail");
+
+        assert_eq!(error, RegistrationError::DuplicateBinding(service_binding));
     }
 }
