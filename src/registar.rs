@@ -179,6 +179,24 @@ impl<M> Registar<M> {
         Ok(())
     }
 
+    /// Removes the registration for a final binding and returns it.
+    ///
+    /// Returns `None` when no service is registered with that binding. A
+    /// service that stops should remove its own registration, so the same
+    /// binding can be registered again, for example when a stopped test
+    /// environment restarts on a fixed port.
+    ///
+    /// The registry is keyed by binding only, so this removes whichever
+    /// registration holds that binding. Callers should pass only a binding
+    /// they registered themselves.
+    pub async fn deregister(&self, service_binding: &ServiceBinding) -> Option<RegisteredService<M>> {
+        self.registry
+            .lock()
+            .await
+            .remove(service_binding)
+            .map(|registration| RegisteredService { registration })
+    }
+
     /// Returns a deterministic, side-effect-free snapshot of all services.
     ///
     /// Results are ordered by protocol, then final socket address, never by
@@ -324,5 +342,76 @@ mod tests {
             .expect_err("duplicate registration should fail");
 
         assert_eq!(error, RegistrationError::DuplicateBinding(service_binding));
+    }
+
+    #[tokio::test]
+    async fn it_should_remove_a_registration_and_return_it_when_deregistered() {
+        let registar = Registar::default();
+        let service_binding = binding(Protocol::HTTP, 8000);
+
+        registar
+            .give_form()
+            .register(ServiceRegistration::new(service_binding.clone(), "first", None))
+            .await
+            .expect("registration should succeed");
+
+        let removed = registar.deregister(&service_binding).await;
+
+        assert_eq!(removed.map(|service| *service.metadata()), Some("first"));
+        assert!(registar.services().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn it_should_allow_registering_a_binding_again_after_it_was_deregistered() {
+        let registar = Registar::default();
+        let service_binding = binding(Protocol::HTTP, 8000);
+
+        registar
+            .give_form()
+            .register(ServiceRegistration::new(service_binding.clone(), "first", None))
+            .await
+            .expect("initial registration should succeed");
+        registar.deregister(&service_binding).await;
+
+        registar
+            .give_form()
+            .register(ServiceRegistration::new(service_binding, "second", None))
+            .await
+            .expect("registration after deregistration should succeed");
+
+        assert_eq!(registar.services().await[0].metadata(), &"second");
+    }
+
+    #[tokio::test]
+    async fn it_should_return_none_when_the_binding_to_deregister_is_not_registered() {
+        let registar = Registar::<()>::default();
+
+        let removed = registar.deregister(&binding(Protocol::HTTP, 8000)).await;
+
+        assert!(removed.is_none());
+    }
+
+    #[tokio::test]
+    async fn it_should_keep_the_other_registrations_when_one_is_deregistered() {
+        let registar = Registar::default();
+        let removed_binding = binding(Protocol::HTTP, 8000);
+
+        for (port, metadata) in [(8000, "removed"), (9000, "kept")] {
+            registar
+                .give_form()
+                .register(ServiceRegistration::new(binding(Protocol::HTTP, port), metadata, None))
+                .await
+                .expect("registration should succeed");
+        }
+
+        registar.deregister(&removed_binding).await;
+
+        let metadata: Vec<_> = registar
+            .services()
+            .await
+            .into_iter()
+            .map(|service| *service.metadata())
+            .collect();
+        assert_eq!(metadata, ["kept"]);
     }
 }
