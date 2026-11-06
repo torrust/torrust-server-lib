@@ -16,6 +16,10 @@ pub struct Started {
 /// This is the message that the "launcher" spawned task receives from the main
 /// application process to notify the service to shutdown.
 ///
+#[deprecated(
+    since = "0.5.0",
+    note = "inject a `tokio_util::sync::CancellationToken` instead of sending `Halted` over a oneshot channel; removal is planned for torrust-server-lib 0.6.0"
+)]
 #[derive(Copy, Clone, Debug, Display)]
 pub enum Halted {
     Normal,
@@ -35,6 +39,10 @@ pub async fn cancellation_signal(cancellation_token: CancellationToken) {
 /// # Panics
 ///
 /// Will panic if the `ctrl_c` or `terminate` signal resolves with an error.
+#[deprecated(
+    since = "0.5.0",
+    note = "libraries must not subscribe to SIGINT/SIGTERM; the executable should subscribe and cancel a `CancellationToken` passed to `cancellation_signal`; removal is planned for torrust-server-lib 0.6.0"
+)]
 #[instrument(skip())]
 pub async fn global_shutdown_signal() {
     let ctrl_c = async {
@@ -63,6 +71,14 @@ pub async fn global_shutdown_signal() {
 /// # Panics
 ///
 /// Will panic if the `stop_receiver` resolves with an error.
+#[deprecated(
+    since = "0.5.0",
+    note = "use `cancellation_signal` with an injected `CancellationToken`; removal is planned for torrust-server-lib 0.6.0"
+)]
+#[allow(
+    deprecated,
+    reason = "the legacy function is implemented with the other legacy symbols until they are removed"
+)]
 #[instrument(skip(rx_halt))]
 pub async fn shutdown_signal(rx_halt: tokio::sync::oneshot::Receiver<Halted>) {
     let halt = async {
@@ -79,6 +95,14 @@ pub async fn shutdown_signal(rx_halt: tokio::sync::oneshot::Receiver<Halted>) {
 }
 
 /// Same as `shutdown_signal()`, but shows a message when it resolves.
+#[deprecated(
+    since = "0.5.0",
+    note = "use `cancellation_signal` with an injected `CancellationToken` and log the message yourself; removal is planned for torrust-server-lib 0.6.0"
+)]
+#[allow(
+    deprecated,
+    reason = "the legacy function is implemented with the other legacy symbols until they are removed"
+)]
 #[instrument(skip(rx_halt))]
 pub async fn shutdown_signal_with_message(rx_halt: tokio::sync::oneshot::Receiver<Halted>, message: String) {
     shutdown_signal(rx_halt).await;
@@ -91,6 +115,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
 
+    #[allow(deprecated, reason = "the test covers the deprecated legacy API until it is removed")]
     use super::{Halted, cancellation_signal, shutdown_signal};
 
     #[tokio::test]
@@ -107,6 +132,7 @@ mod tests {
         wait_task.await.expect("cancellation wait task should complete");
     }
 
+    #[allow(deprecated, reason = "the test covers the deprecated legacy API until it is removed")]
     #[tokio::test]
     async fn shutdown_signal_should_resolve_when_it_receives_a_legacy_halted_message() {
         let (halt_sender, halt_receiver) = oneshot::channel();
