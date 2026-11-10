@@ -8,6 +8,8 @@ Common functionality used in all Torrust HTTP servers.
 
 [Crate documentation](https://docs.rs/torrust-server-lib).
 
+[Release process](docs/release_process.md).
+
 ## License
 
 The project is licensed under the terms of the [GNU AFFERO GENERAL PUBLIC LICENSE](./LICENSE).
