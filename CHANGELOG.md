@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.0
+
+### Removed
+
+The legacy shutdown API in `torrust_server_lib::signals`, deprecated since `0.5.0`, is removed.
+This is a breaking release.
+
+| Removed                         | Migrate to                                                                                                           |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `Halted`                        | Inject a `tokio_util::sync::CancellationToken`.                                                                      |
+| `shutdown_signal`               | `cancellation_signal(token)`.                                                                                        |
+| `shutdown_signal_with_message`  | `cancellation_signal(token)` followed by your own log line.                                                          |
+| `global_shutdown_signal`        | The executable subscribes to SIGINT/SIGTERM and cancels the injected token.                                          |
+
+`Started` and `cancellation_signal` are unchanged.
+
+The crate no longer enables the `tokio` `signal` feature and no longer depends on `derive_more`.
+
+For the migration steps, see the `0.5.0` section below: executables own SIGINT/SIGTERM and cancel an
+injected `CancellationToken`.
+
 ## 0.5.0
 
 ### Deprecated
